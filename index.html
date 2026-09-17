@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ea1d2c">
+<title>Leitor iFood</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;background:#f6f6f6;color:#222}
+.app{max-width:520px;margin:auto;min-height:100vh;padding:18px}
+header{text-align:center;padding:12px 0 18px}.logo{font-size:42px}h1{margin:5px 0;font-size:25px}.sub{color:#666;margin:0}
+.card{background:#fff;border-radius:20px;padding:18px;box-shadow:0 4px 20px #0001}
+.camera{position:relative;background:#111;border-radius:16px;overflow:hidden;display:none}
+video{display:block;width:100%;aspect-ratio:4/3;object-fit:cover}
+.box{position:absolute;left:7%;right:7%;top:30%;height:40%;border:3px solid #ea1d2c;border-radius:12px;box-shadow:0 0 0 999px #0005}
+.hint{position:absolute;bottom:10px;left:0;right:0;text-align:center;color:#fff;font-weight:700;text-shadow:0 1px 3px #000}
+button{width:100%;border:0;border-radius:14px;padding:16px;margin-top:12px;font-size:17px;font-weight:700}
+.primary{background:#ea1d2c;color:#fff}.secondary{background:#eee;color:#222}
+.status{text-align:center;color:#666;min-height:22px;margin:13px 0}
+.code{font-size:31px;letter-spacing:5px;text-align:center;font-weight:800;padding:15px;background:#f5f5f5;border-radius:14px;margin-top:10px}
+.hidden{display:none!important}.manual{display:flex;gap:8px}input{width:100%;padding:15px;border:1px solid #ddd;border-radius:12px;font-size:22px;text-align:center;letter-spacing:4px}
+.small{font-size:12px;color:#777;text-align:center;line-height:1.4;margin-top:14px}
+</style>
+</head>
+<body>
+<div class="app">
+<header><div class="logo">📦</div><h1>Leitor de Localizador</h1><p class="sub">Aponte para os 8 dígitos da comanda</p></header>
+<div class="card">
+<div id="camera" class="camera">
+<video id="video" autoplay muted playsinline></video>
+<div class="box"></div><div class="hint">Centralize os 8 números dentro da caixa</div>
+</div>
+<button id="start" class="primary">📷 Iniciar escaneamento</button>
+<button id="stop" class="secondary hidden">Parar câmera</button>
+<div id="status" class="status">Pronto para escanear.</div>
+<div id="result" class="hidden">
+<div id="code" class="code">--------</div>
+<button id="copy" class="secondary">📋 Copiar código</button>
+<button id="open" class="primary">🚀 Abrir confirmação do iFood</button>
+</div>
+<div style="margin-top:20px;border-top:1px solid #eee;padding-top:16px">
+<p style="text-align:center;color:#666;margin:0 0 8px">Ou digite manualmente</p>
+<input id="manual" inputmode="numeric" maxlength="8" placeholder="12345678">
+<button id="use" class="secondary">Usar este código</button>
+</div>
+<p class="small">A leitura em tempo real funciona quando o site está em HTTPS (ou localhost). O código reconhecido é copiado automaticamente.</p>
+</div>
+</div>
+
+<script>
+const video=document.getElementById('video'),camera=document.getElementById('camera');
+const start=document.getElementById('start'),stop=document.getElementById('stop'),status=document.getElementById('status');
+const result=document.getElementById('result'),codeBox=document.getElementById('code'),manual=document.getElementById('manual');
+let stream=null,worker=null,running=false,busy=false,lastCode="",stable="",stableCount=0;
+
+function msg(t){status.textContent=t}
+function setCode(v){
+ v=String(v).replace(/\D/g,''); if(v.length!==8)return false;
+ lastCode=v;codeBox.textContent=v;result.classList.remove('hidden');
+ navigator.clipboard?.writeText(v).catch(()=>{});
+ msg("Código encontrado e copiado!");
+ return true;
+}
+function candidate(text){
+ const matches=String(text).match(/\b\d{8}\b/g); if(matches)return matches[0];
+ const digits=String(text).replace(/\D/g,''); return digits.length===8?digits:null;
+}
+async function startCam(){
+ try{
+  if(!navigator.mediaDevices?.getUserMedia) throw new Error("no camera api");
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"},width:{ideal:1280},height:{ideal:720}},audio:false});
+  video.srcObject=stream;camera.style.display="block";start.classList.add("hidden");stop.classList.remove("hidden");
+  running=true;msg("Aponte para os 8 números...");
+  if(!worker) worker=await Tesseract.createWorker("eng");
+  scan();
+ }catch(e){
+  console.error(e);
+  msg("A câmera ao vivo precisa de HTTPS. Se estiver abrindo como content://, publique o site ou use a versão de foto.");
+ }
+}
+function stopCam(){
+ running=false;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;
+ camera.style.display="none";start.classList.remove("hidden");stop.classList.add("hidden");
+}
+async function scan(){
+ const canvas=document.createElement("canvas"),ctx=canvas.getContext("2d");
+ while(running){
+  if(busy||video.readyState<2){await new Promise(r=>setTimeout(r,150));continue}
+  busy=true;
+  // Crop the central guide area to make OCR focus on the locator.
+  const w=video.videoWidth,h=video.videoHeight;
+  const sx=Math.floor(w*.07), sy=Math.floor(h*.30), sw=Math.floor(w*.86), sh=Math.floor(h*.40);
+  canvas.width=sw;canvas.height=sh;ctx.drawImage(video,sx,sy,sw,sh,0,0,sw,sh);
+  try{
+   const out=await worker.recognize(canvas,{tessedit_char_whitelist:"0123456789",classify_bln_numeric_mode:"1"});
+   const c=candidate(out.data.text);
+   if(c){
+    if(c===stable)stableCount++; else {stable=c;stableCount=1}
+    msg("Número detectado: "+c+" — mantenha parado...");
+    if(stableCount>=2){setCode(c);stopCam();busy=false;break}
+   }
+  }catch(e){}
+  busy=false;
+  await new Promise(r=>setTimeout(r,250));
+ }
+}
+start.onclick=startCam;stop.onclick=stopCam;
+document.getElementById("copy").onclick=async()=>{try{await navigator.clipboard.writeText(lastCode);msg("Código copiado novamente.")}catch(e){msg("Selecione e copie o código.")}};
+document.getElementById("open").onclick=()=>location.href="https://confirmacao-entrega-propria.ifood.com.br/";
+document.getElementById("use").onclick=()=>{if(!setCode(manual.value))msg("Digite exatamente 8 números.")};
+manual.oninput=()=>manual.value=manual.value.replace(/\D/g,"").slice(0,8);
+</script>
+</body>
+</html>
